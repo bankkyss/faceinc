@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc highgui dnn)
+find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc highgui dnn calib3d)
 
 if(NOT ONNXRUNTIME_ROOT)
     message(FATAL_ERROR "Please provide -DONNXRUNTIME_ROOT=/path/to/onnxruntime")
