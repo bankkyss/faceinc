@@ -322,6 +322,18 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
 
         int height = (score_shape.size() >= 4) ? static_cast<int>(score_shape[2]) : -1;
         int width = (score_shape.size() >= 4) ? static_cast<int>(score_shape[3]) : -1;
+        std::cerr << "SCRFD stride=" << stride << " score_shape="
+                  << ((score_shape.size() >= 4) ? std::to_string(score_shape[2]) : "?") << "x"
+                  << ((score_shape.size() >= 4) ? std::to_string(score_shape[3]) : "?")
+                  << " bbox_shape="
+                  << ((bbox_shape.size() >= 4) ? std::to_string(bbox_shape[2]) : "?") << "x"
+                  << ((bbox_shape.size() >= 4) ? std::to_string(bbox_shape[3]) : "?")
+                  << std::endl;
+        const int max_reasonable_dim = 1024;
+        if (height > max_reasonable_dim || width > max_reasonable_dim) {
+            height = -1;
+            width = -1;
+        }
         if (height <= 0 || width <= 0) {
             height = std::max(1, (input_height + stride - 1) / stride);
             width = std::max(1, (input_width + stride - 1) / stride);
