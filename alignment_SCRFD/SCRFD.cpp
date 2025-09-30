@@ -295,8 +295,15 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
 
     const char* input_names[] = {input_name_.c_str()};
     Ort::RunOptions run_options;
-    auto output_tensors = session_->Run(run_options, input_names, &input_tensor, 1,
-                                        output_name_ptrs_.data(), output_name_ptrs_.size());
+    std::vector<Ort::Value> output_tensors;
+    try {
+        output_tensors = session_->Run(run_options, input_names, &input_tensor, 1,
+                                       output_name_ptrs_.data(), output_name_ptrs_.size());
+    } catch (const std::exception& ex) {
+        std::ostringstream oss;
+        oss << "SCRFD inference failed: " << ex.what();
+        throw std::runtime_error(oss.str());
+    }
 
     ForwardResult result;
 
@@ -310,17 +317,35 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
 
         auto score_info = score_tensor.GetTensorTypeAndShapeInfo();
         auto bbox_info = bbox_tensor.GetTensorTypeAndShapeInfo();
-        const int height = std::max(1, (input_height + stride - 1) / stride);
-        const int width = std::max(1, (input_width + stride - 1) / stride);
-        const int locations = height * width;
+        const auto score_shape = score_info.GetShape();
+        const auto bbox_shape = bbox_info.GetShape();
+
+        int height = (score_shape.size() >= 4) ? static_cast<int>(score_shape[2]) : -1;
+        int width = (score_shape.size() >= 4) ? static_cast<int>(score_shape[3]) : -1;
+        if (height <= 0 || width <= 0) {
+            height = std::max(1, (input_height + stride - 1) / stride);
+            width = std::max(1, (input_width + stride - 1) / stride);
+        }
+
+        const std::size_t locations_sz = static_cast<std::size_t>(height) * static_cast<std::size_t>(width);
+        if (locations_sz == 0 || locations_sz > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            std::ostringstream oss;
+            oss << "SCRFD invalid location count (stride=" << stride << ", height=" << height
+                << ", width=" << width << ")";
+            throw std::runtime_error(oss.str());
+        }
+        const int locations = static_cast<int>(locations_sz);
 
         const int anchors_per_loc = num_anchors_;
 
+        int score_channels = (score_shape.size() >= 2) ? static_cast<int>(score_shape[1]) : -1;
         const int64_t score_element_count = score_info.GetElementCount();
-        if (score_element_count <= 0 || score_element_count % locations != 0) {
-            throw std::runtime_error("SCRFD score output shape mismatch");
+        if (score_channels <= 0) {
+            if (score_element_count <= 0 || score_element_count % static_cast<int64_t>(locations) != 0) {
+                throw std::runtime_error("SCRFD score output shape mismatch");
+            }
+            score_channels = static_cast<int>(score_element_count / static_cast<int64_t>(locations));
         }
-        const int score_channels = static_cast<int>(score_element_count / locations);
         if (score_channels % anchors_per_loc != 0) {
             throw std::runtime_error("SCRFD score channels not divisible by anchors per location");
         }
@@ -330,7 +355,11 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
         const float* bbox_data = bbox_tensor.GetTensorData<float>();
 
         std::vector<float> scores_curr;
-        scores_curr.reserve(locations * anchors_per_loc);
+        const std::size_t total_positions = static_cast<std::size_t>(locations) * static_cast<std::size_t>(anchors_per_loc);
+        if (total_positions > scores_curr.max_size()) {
+            throw std::runtime_error("SCRFD score buffer request exceeds max_size");
+        }
+        scores_curr.reserve(total_positions);
 
         for (int loc = 0; loc < locations; ++loc) {
             for (int anchor = 0; anchor < anchors_per_loc; ++anchor) {
@@ -343,11 +372,14 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
             }
         }
 
+        int bbox_channels = (bbox_shape.size() >= 2) ? static_cast<int>(bbox_shape[1]) : -1;
         const int64_t bbox_element_count = bbox_info.GetElementCount();
-        if (bbox_element_count <= 0 || bbox_element_count % locations != 0) {
-            throw std::runtime_error("SCRFD bbox output shape mismatch");
+        if (bbox_channels <= 0) {
+            if (bbox_element_count <= 0 || bbox_element_count % static_cast<int64_t>(locations) != 0) {
+                throw std::runtime_error("SCRFD bbox output shape mismatch");
+            }
+            bbox_channels = static_cast<int>(bbox_element_count / static_cast<int64_t>(locations));
         }
-        const int bbox_channels = static_cast<int>(bbox_element_count / locations);
         if (bbox_channels % anchors_per_loc != 0) {
             throw std::runtime_error("SCRFD bbox channels not divisible by anchors per location");
         }
@@ -357,7 +389,7 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
         }
 
         std::vector<cv::Vec4f> bbox_deltas;
-        bbox_deltas.reserve(locations * anchors_per_loc);
+        bbox_deltas.reserve(total_positions);
         for (int loc = 0; loc < locations; ++loc) {
             for (int anchor = 0; anchor < anchors_per_loc; ++anchor) {
                 const float* anchor_ptr = bbox_data + anchor * bbox_per_anchor * locations;
@@ -374,11 +406,18 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
         if (use_kps_) {
             const auto& kps_tensor = output_tensors.at(idx + fmc_ * 2);
             auto kps_info = kps_tensor.GetTensorTypeAndShapeInfo();
+            const auto kps_shape = kps_info.GetShape();
+            int kps_channels = (kps_shape.size() >= 2) ? static_cast<int>(kps_shape[1]) : -1;
             const int64_t kps_element_count = kps_info.GetElementCount();
-            if (kps_element_count <= 0 || kps_element_count % locations != 0) {
+            if (kps_channels <= 0) {
+                if (kps_element_count <= 0 || kps_element_count % static_cast<int64_t>(locations) != 0) {
+                    throw std::runtime_error("SCRFD keypoint output shape mismatch");
+                }
+                kps_channels = static_cast<int>(kps_element_count / static_cast<int64_t>(locations));
+            }
+            if (kps_element_count <= 0 || kps_element_count % static_cast<int64_t>(locations) != 0) {
                 throw std::runtime_error("SCRFD keypoint output shape mismatch");
             }
-            const int kps_channels = static_cast<int>(kps_element_count / locations);
             if (kps_channels % anchors_per_loc != 0) {
                 throw std::runtime_error("SCRFD keypoint channels not divisible by anchors per location");
             }
@@ -386,7 +425,7 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
             if (coords_per_anchor != 10) {
                 throw std::runtime_error("SCRFD expects 10 keypoint channels per anchor");
             }
-            kps_curr.reserve(locations * anchors_per_loc);
+            kps_curr.reserve(total_positions);
             const float* kps_data = kps_tensor.GetTensorData<float>();
             for (int loc = 0; loc < locations; ++loc) {
                 for (int anchor = 0; anchor < anchors_per_loc; ++anchor) {

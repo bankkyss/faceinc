@@ -90,6 +90,11 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Failed to load one or both images");
         }
 
+        std::cout << "Loaded A: " << image_path_a << " (" << img_a.cols << "x" << img_a.rows
+                  << ")" << std::endl;
+        std::cout << "Loaded B: " << image_path_b << " (" << img_b.cols << "x" << img_b.rows
+                  << ")" << std::endl;
+
         auto process_image = [&](const cv::Mat& img) {
             auto [detections, keypoints] = detector.detect(img, 0.3f, cv::Size(480, 480));
             if (detections.empty()) {
