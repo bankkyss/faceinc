@@ -309,19 +309,24 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
 
         auto score_info = score_tensor.GetTensorTypeAndShapeInfo();
         auto bbox_info = bbox_tensor.GetTensorTypeAndShapeInfo();
-        const auto score_shape = score_info.GetShape();
-        const auto bbox_shape = bbox_info.GetShape();
-
-        const int height = static_cast<int>(score_shape[2]);
-        const int width = static_cast<int>(score_shape[3]);
+        const int height = std::max(1, (input_height + stride - 1) / stride);
+        const int width = std::max(1, (input_width + stride - 1) / stride);
         const int locations = height * width;
+
+        const int anchors_per_loc = num_anchors_;
+
+        const int64_t score_element_count = score_info.GetElementCount();
+        if (score_element_count <= 0 || score_element_count % locations != 0) {
+            throw std::runtime_error("SCRFD score output shape mismatch");
+        }
+        const int score_channels = static_cast<int>(score_element_count / locations);
+        if (score_channels % anchors_per_loc != 0) {
+            throw std::runtime_error("SCRFD score channels not divisible by anchors per location");
+        }
+        const int cls_per_anchor = score_channels / anchors_per_loc;
 
         const float* score_data = score_tensor.GetTensorData<float>();
         const float* bbox_data = bbox_tensor.GetTensorData<float>();
-
-        const int anchors_per_loc = num_anchors_;
-        const int score_channels = static_cast<int>(score_shape[1]);
-        const int cls_per_anchor = score_channels / anchors_per_loc;
 
         std::vector<float> scores_curr;
         scores_curr.reserve(locations * anchors_per_loc);
@@ -337,7 +342,14 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
             }
         }
 
-        const int bbox_channels = static_cast<int>(bbox_shape[1]);
+        const int64_t bbox_element_count = bbox_info.GetElementCount();
+        if (bbox_element_count <= 0 || bbox_element_count % locations != 0) {
+            throw std::runtime_error("SCRFD bbox output shape mismatch");
+        }
+        const int bbox_channels = static_cast<int>(bbox_element_count / locations);
+        if (bbox_channels % anchors_per_loc != 0) {
+            throw std::runtime_error("SCRFD bbox channels not divisible by anchors per location");
+        }
         const int bbox_per_anchor = bbox_channels / anchors_per_loc;
         if (bbox_per_anchor != 4) {
             throw std::runtime_error("SCRFD expects 4 bbox channels per anchor");
@@ -361,14 +373,20 @@ SCRFD::ForwardResult SCRFD::forward(const cv::Mat& img, float threshold) {
         if (use_kps_) {
             const auto& kps_tensor = output_tensors.at(idx + fmc_ * 2);
             auto kps_info = kps_tensor.GetTensorTypeAndShapeInfo();
-            const auto kps_shape = kps_info.GetShape();
-            const float* kps_data = kps_tensor.GetTensorData<float>();
-            const int kps_channels = static_cast<int>(kps_shape[1]);
+            const int64_t kps_element_count = kps_info.GetElementCount();
+            if (kps_element_count <= 0 || kps_element_count % locations != 0) {
+                throw std::runtime_error("SCRFD keypoint output shape mismatch");
+            }
+            const int kps_channels = static_cast<int>(kps_element_count / locations);
+            if (kps_channels % anchors_per_loc != 0) {
+                throw std::runtime_error("SCRFD keypoint channels not divisible by anchors per location");
+            }
             const int coords_per_anchor = kps_channels / anchors_per_loc;
             if (coords_per_anchor != 10) {
                 throw std::runtime_error("SCRFD expects 10 keypoint channels per anchor");
             }
             kps_curr.reserve(locations * anchors_per_loc);
+            const float* kps_data = kps_tensor.GetTensorData<float>();
             for (int loc = 0; loc < locations; ++loc) {
                 for (int anchor = 0; anchor < anchors_per_loc; ++anchor) {
                     const float* anchor_ptr = kps_data + anchor * coords_per_anchor * locations;
